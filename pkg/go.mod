@@ -1,6 +1,6 @@
 module github.com/ipko1996/huweathersim/pkg
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/klauspost/compress v1.15.9 // indirect

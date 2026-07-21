@@ -1,3 +1,3 @@
 module github.com/ipko1996/huweathersim/services/sensor-gateway
 
-go 1.25.0
+go 1.26.0
