@@ -4,6 +4,14 @@
 *.out
 *.test
 *.prof
+coverage.html
+
+# Go workspace: go.work IS committed (it defines the monorepo module layout),
+# but go.work.sum is a local dependency-resolution cache, not a source artifact.
+go.work.sum
+
+# Local compose overrides (docker-compose.yml itself is committed)
+deploy/compose/docker-compose.override.yml
 
 # Local binaries built from cmd/
 **/cmd/*/gateway

@@ -7,6 +7,13 @@
 # Every dir containing a go.mod (each service module + shared pkg once it has one).
 GO_MODULES := $(shell find services pkg -name go.mod -exec dirname {} \; 2>/dev/null)
 
+# Modules that actually contain Go source. A module scaffolded ahead of its code
+# (an empty `pkg/`, say) has a go.mod but no packages, and `go vet ./...` treats
+# "matched no packages" as an error — which would fail CI for no real reason.
+# The code targets below iterate this filtered list; `tidy` still covers them all.
+GO_CODE_MODULES := $(shell for m in $(GO_MODULES); do \
+	[ -n "$$(find $$m -name '*.go' -print -quit)" ] && echo $$m; done)
+
 .PHONY: help test vet fmt build tidy check up down
 
 help: ## Show this help
@@ -14,16 +21,16 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
 test: ## Run all Go tests in every module
-	@for m in $(GO_MODULES); do echo "==> test $$m"; (cd $$m && go test ./...) || exit 1; done
+	@for m in $(GO_CODE_MODULES); do echo "==> test $$m"; (cd $$m && go test ./...) || exit 1; done
 
 vet: ## Run go vet in every module
-	@for m in $(GO_MODULES); do echo "==> vet $$m"; (cd $$m && go vet ./...) || exit 1; done
+	@for m in $(GO_CODE_MODULES); do echo "==> vet $$m"; (cd $$m && go vet ./...) || exit 1; done
 
 fmt: ## Format all Go code
-	@for m in $(GO_MODULES); do echo "==> fmt $$m"; (cd $$m && go fmt ./...); done
+	@for m in $(GO_CODE_MODULES); do echo "==> fmt $$m"; (cd $$m && go fmt ./...); done
 
 build: ## Build all modules
-	@for m in $(GO_MODULES); do echo "==> build $$m"; (cd $$m && go build ./...) || exit 1; done
+	@for m in $(GO_CODE_MODULES); do echo "==> build $$m"; (cd $$m && go build ./...) || exit 1; done
 
 tidy: ## Sync go.mod/go.sum in every module
 	@for m in $(GO_MODULES); do echo "==> tidy $$m"; (cd $$m && go mod tidy); done
