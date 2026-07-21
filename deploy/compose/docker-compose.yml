@@ -1,0 +1,107 @@
+# HU-WeatherSim — local infrastructure (Phase 0).
+# This file brings up ONLY the backing infrastructure the services need:
+#   - Kafka (single-node, KRaft mode — no ZooKeeper)
+#   - Redis (sensor registry / cache)
+#   - TimescaleDB (time-series history)
+#   - Kafka UI (a browser dashboard to SEE topics & messages while learning)
+#
+# The Go services themselves are NOT here yet — during Phases 0–1 you run them
+# with `go run` on the host. They connect to Kafka on localhost:9092.
+# We add the services into this file in Phase 2.
+#
+# Usage:
+#   cd deploy/compose
+#   docker compose up -d      # start in the background
+#   docker compose ps         # see status/health
+#   docker compose logs -f kafka
+#   docker compose down       # stop (add -v to also wipe data volumes)
+
+name: huweathersim
+
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: huws-kafka
+    ports:
+      - "9092:9092" # host access: your `go run` producer/consumer use localhost:9092
+    environment:
+      # --- KRaft (no ZooKeeper): this one node is both broker AND controller ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+
+      # --- Listeners: the tricky bit, explained ---
+      # We define TWO client listeners because clients reach Kafka from two places:
+      #   HOST   -> from your machine (go run):        localhost:9092
+      #   DOCKER -> from other containers (Phase 2+):  kafka:29092
+      # Kafka tells a client which address to use via ADVERTISED_LISTENERS, so each
+      # side gets an address that actually resolves from where it lives.
+      KAFKA_LISTENERS: HOST://0.0.0.0:9092,DOCKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9092,DOCKER://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: HOST:PLAINTEXT,DOCKER:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+
+      # --- Single-node replication settings (a 1-node cluster can't replicate) ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Let clients auto-create topics for now; in Phase 1 we'll create them explicitly.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # The image ships the CLI tools; listing topics proves the broker is ready.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  kafka-ui:
+    image: kafbat/kafka-ui:latest
+    container_name: huws-kafka-ui
+    ports:
+      - "8081:8080" # open http://localhost:8081 to browse topics & messages
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092 # uses the internal DOCKER listener
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    container_name: huws-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: huws-timescale
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: weather
+      POSTGRES_PASSWORD: weather
+      POSTGRES_DB: weather
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weather -d weather"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  kafka-data:
+  redis-data:
+  timescale-data:

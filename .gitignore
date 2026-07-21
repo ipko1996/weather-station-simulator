@@ -1,0 +1,27 @@
+# Go build artifacts
+/bin/
+*.exe
+*.out
+*.test
+*.prof
+
+# Local binaries built from cmd/
+**/cmd/*/gateway
+**/cmd/*/simulator
+**/cmd/*/*-service
+
+# Env / secrets (never commit real secrets)
+.env
+.env.local
+*.local.env
+
+# Node / frontend (Phase 3)
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
