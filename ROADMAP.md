@@ -22,7 +22,7 @@ Monorepo, Go workspace, first service, and local infra.
 - **Tests:** HTTP handler test for `/healthz` via `net/http/httptest`
 - **Done when:** `docker compose up` starts the infra, and `curl /healthz` returns OK. ✅
 
-## Phase 1 — Kafka fundamentals in Go ⬜
+## Phase 1 — Kafka fundamentals in Go ✅
 
 First producer + consumer; the concurrency primitives that power the whole system.
 
