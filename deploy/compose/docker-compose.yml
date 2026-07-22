@@ -47,10 +47,29 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      # Let clients auto-create topics for now; in Phase 1 we'll create them explicitly.
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Auto-creation is OFF: an auto-created topic gets the broker default of
+      # ONE partition, silently capping consumer parallelism. Since Phase 1,
+      # every service creates its topics explicitly via kafkax.EnsureTopic with
+      # a deliberate partition count — so a topic appearing "by accident" here
+      # could only ever be a misconfiguration, and should fail loudly instead.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      # Where Kafka actually stores its log segments (the messages themselves)
+      # AND, in KRaft mode, the cluster metadata.
+      #
+      # This MUST be set. Without it the apache/kafka image defaults to
+      # /tmp/kafka-logs, so the volume mounted below would sit empty while the
+      # real data lived in the container's writable layer — silently discarded
+      # on `docker compose down`.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
-      - kafka-data:/var/lib/kafka/data
+      # Bind-mounted into the repo (git-ignored) instead of a named Docker
+      # volume, so the data is visible with `ls` and easy to inspect or wipe.
+      #
+      # The `:Z` suffix matters on SELinux systems like Fedora: it relabels the
+      # directory with a container-private SELinux context. Without it the
+      # container is denied write access and Kafka fails to start.
+      - ./data/kafka:/var/lib/kafka/data:Z
     healthcheck:
       # The image ships the CLI tools; listing topics proves the broker is ready.
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
@@ -102,6 +121,7 @@ services:
       retries: 5
 
 volumes:
-  kafka-data:
+  # Kafka now bind-mounts to ./data/kafka (see the kafka service above) rather
+  # than using a named volume, so no kafka-data entry is needed here.
   redis-data:
   timescale-data:

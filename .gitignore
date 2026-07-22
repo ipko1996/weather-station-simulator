@@ -13,6 +13,10 @@ go.work.sum
 # Local compose overrides (docker-compose.yml itself is committed)
 deploy/compose/docker-compose.override.yml
 
+# Local infra state: Kafka log segments and KRaft cluster metadata, bind-mounted
+# out of the container so it's inspectable. Throwaway data — never committed.
+deploy/compose/data/
+
 # Local binaries built from cmd/
 **/cmd/*/gateway
 **/cmd/*/simulator
