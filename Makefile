@@ -14,14 +14,21 @@ GO_MODULES := $(shell find services pkg -name go.mod -exec dirname {} \; 2>/dev/
 GO_CODE_MODULES := $(shell for m in $(GO_MODULES); do \
 	[ -n "$$(find $$m -name '*.go' -print -quit)" ] && echo $$m; done)
 
-.PHONY: help test vet fmt build tidy check up down
+.PHONY: help test test-integration test-race vet fmt build tidy check up down
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
-test: ## Run all Go tests in every module
+test: ## Run all Go tests in every module (fast; no Docker needed)
 	@for m in $(GO_CODE_MODULES); do echo "==> test $$m"; (cd $$m && go test ./...) || exit 1; done
+
+test-integration: ## Run integration tests (needs Docker; starts real Kafka containers)
+	@for m in $(GO_CODE_MODULES); do echo "==> integration $$m"; \
+		(cd $$m && go test -tags=integration -timeout 10m ./...) || exit 1; done
+
+test-race: ## Run tests with the race detector (catches concurrency bugs)
+	@for m in $(GO_CODE_MODULES); do echo "==> race $$m"; (cd $$m && go test -race ./...) || exit 1; done
 
 vet: ## Run go vet in every module
 	@for m in $(GO_CODE_MODULES); do echo "==> vet $$m"; (cd $$m && go vet ./...) || exit 1; done
