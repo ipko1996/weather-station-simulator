@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/ipko1996/huweathersim/pkg/registry"
 	"github.com/ipko1996/huweathersim/services/sensor-gateway/internal/httpapi"
 )
 
@@ -31,10 +35,30 @@ func run() error {
 	// Twelve-factor config: everything comes from the environment, which is how
 	// it works in compose (Phase 2) and Kubernetes ConfigMaps (Phase 4).
 	addr := ":" + getenv("PORT", "8080")
+	redisAddr := getenv("REDIS_ADDR", "localhost:6379")
+
+	rdb := goredis.NewClient(&goredis.Options{Addr: redisAddr})
+	defer func() {
+		if err := rdb.Close(); err != nil {
+			log.Printf("closing redis client: %v", err)
+		}
+	}()
+
+	// Fail fast at boot if Redis is unreachable — same philosophy as
+	// EnsureTopic in the Kafka services: a service that can't reach its one
+	// dependency should say so immediately with a clear error, not serve 500s
+	// until someone reads the logs. (NewClient itself never dials; go-redis
+	// connects lazily on the first command, so PING is that first command.)
+	pingCtx, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelPing()
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		return fmt.Errorf("redis unreachable at %s: %w", redisAddr, err)
+	}
+	log.Printf("connected to redis at %s", redisAddr)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           httpapi.NewRouter(),
+		Handler:           httpapi.NewRouter(registry.New(rdb)),
 		ReadHeaderTimeout: 5 * time.Second, // basic protection against slow-loris
 	}
 

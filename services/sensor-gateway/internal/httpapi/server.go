@@ -23,7 +23,11 @@ import (
 //     applied to every route in one place instead of inside each handler
 //   - route grouping + URL params ({id}) that stay readable as the sensor
 //     CRUD API grows
-func NewRouter() http.Handler {
+//
+// The store parameter is this service's entire dependency injection: main
+// passes the Redis-backed registry, tests pass an in-memory fake. No
+// container, no decorators — a function argument.
+func NewRouter(store SensorStore) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware in chi is nothing magic: each one is a plain function taking
@@ -45,6 +49,16 @@ func NewRouter() http.Handler {
 	// "GET /healthz" in the Phase 0 mux becomes method + path as separate
 	// arguments. Same behavior: other methods on this path get a 405.
 	r.Get("/healthz", handleHealthz)
+
+	// Route grouping: everything under /api/sensors in one block. {id} is a
+	// URL parameter — the handler reads it with chi.URLParam.
+	h := &sensorHandlers{store: store}
+	r.Route("/api/sensors", func(r chi.Router) {
+		r.Post("/", h.create)
+		r.Get("/", h.list)
+		r.Get("/{id}", h.get)
+		r.Delete("/{id}", h.remove)
+	})
 
 	return r
 }

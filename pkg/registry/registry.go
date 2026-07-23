@@ -54,7 +54,10 @@ func New(rdb *redis.Client) *Registry {
 // reader can ever observe the hash without its index entry or vice versa.
 func (r *Registry) Add(ctx context.Context, s Sensor) error {
 	if err := s.Validate(); err != nil {
-		return fmt.Errorf("invalid sensor: %w", err)
+		// Both %w verbs matter: the error matches ErrInvalidSensor (the
+		// category, for HTTP status mapping) AND the specific field sentinel
+		// like events.ErrOutOfBounds (the cause) via errors.Is.
+		return fmt.Errorf("%w: %w", ErrInvalidSensor, err)
 	}
 
 	pipe := r.rdb.TxPipeline()

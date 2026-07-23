@@ -63,6 +63,14 @@ const (
 var (
 	ErrInvalidPattern     = errors.New("unknown drift pattern")
 	ErrIntervalOutOfRange = fmt.Errorf("interval outside %s-%s", MinInterval, MaxInterval)
+
+	// ErrInvalidSensor marks every validation failure from Add, so callers
+	// can separate "the caller sent bad data" (HTTP 400) from "the store is
+	// broken" (HTTP 500) with ONE errors.Is check instead of enumerating
+	// every field-level sentinel. Getting this wrong has real consequences:
+	// answering 400 to a Redis outage tells clients "your request is bad,
+	// don't retry" about a request that would succeed on retry.
+	ErrInvalidSensor = errors.New("invalid sensor")
 )
 
 // Sensor is a registered virtual weather station: everything the simulator

@@ -11,7 +11,7 @@ import (
 // memory — no server, no port, no network. httptest gives us a fake request and a
 // ResponseRecorder that captures whatever the handler writes.
 func TestHealthz(t *testing.T) {
-	router := NewRouter()
+	router := NewRouter(newFakeStore())
 
 	t.Run("GET returns 200 and ok status", func(t *testing.T) {
 		// Build a fake GET request and a recorder to capture the response.
