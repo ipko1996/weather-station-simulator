@@ -4,8 +4,8 @@
 # targets loop over every directory that has a go.mod and run the command there.
 # This is exactly what CI (GitHub Actions) will call in Phase 8.
 
-# Every dir containing a go.mod (each service module + shared pkg once it has one).
-GO_MODULES := $(shell find services pkg -name go.mod -exec dirname {} \; 2>/dev/null)
+# Every dir containing a go.mod (each service module + shared pkg + tests).
+GO_MODULES := $(shell find services pkg tests -name go.mod -exec dirname {} \; 2>/dev/null)
 
 # Modules that actually contain Go source. A module scaffolded ahead of its code
 # (an empty `pkg/`, say) has a go.mod but no packages, and `go vet ./...` treats
@@ -14,7 +14,7 @@ GO_MODULES := $(shell find services pkg -name go.mod -exec dirname {} \; 2>/dev/
 GO_CODE_MODULES := $(shell for m in $(GO_MODULES); do \
 	[ -n "$$(find $$m -name '*.go' -print -quit)" ] && echo $$m; done)
 
-.PHONY: help test test-integration test-race vet fmt build tidy check up down up-all down-all logs
+.PHONY: help test test-integration test-race vet fmt build tidy check up down up-all down-all logs test-e2e
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -26,6 +26,9 @@ test: ## Run all Go tests in every module (fast; no Docker needed)
 test-integration: ## Run integration tests (needs Docker; starts real Kafka containers)
 	@for m in $(GO_CODE_MODULES); do echo "==> integration $$m"; \
 		(cd $$m && go test -tags=integration -timeout 10m ./...) || exit 1; done
+
+test-e2e: ## Run black-box end-to-end tests against the RUNNING stack (make up-all first)
+	cd tests/e2e && go test -tags=e2e -timeout 5m -count=1 -v ./...
 
 test-race: ## Run tests with the race detector (catches concurrency bugs)
 	@for m in $(GO_CODE_MODULES); do echo "==> race $$m"; (cd $$m && go test -race ./...) || exit 1; done
