@@ -20,6 +20,24 @@ type Consumer struct {
 	reader *kafka.Reader
 }
 
+// Option adjusts the consumer's reader configuration. This is the functional
+// options pattern — Go's answer to optional parameters: NewConsumer's
+// defaults stay authoritative, and a caller states only what it deviates on,
+// by name, at the call site.
+type Option func(*kafka.ReaderConfig)
+
+// WithLatestStartOffset makes a NEW consumer group start at the end of the
+// topic instead of replaying the retained log. For work-sharing consumers
+// (ingestion, aggregation) replaying is exactly right — process everything
+// once. For fan-out consumers like the notification-gateway it is exactly
+// wrong: a freshly started instance would shove an hour of stale aggregates
+// at every connected browser before the first live one.
+func WithLatestStartOffset() Option {
+	return func(cfg *kafka.ReaderConfig) {
+		cfg.StartOffset = kafka.LastOffset
+	}
+}
+
 // NewConsumer joins the consumer group `groupID` on `topic`.
 //
 // The group ID is the important argument. Every consumer sharing a group ID:
@@ -29,28 +47,32 @@ type Consumer struct {
 // Start a second pod with the same group and Kafka rebalances partitions across
 // both automatically. That is the entire mechanism behind Phase 6 autoscaling.
 // Use a *different* group ID and you get an independent copy of the whole stream
-// instead — which is how Phase 2 lets several services read the same topic.
-func NewConsumer(brokers []string, topic, groupID string) *Consumer {
-	return &Consumer{
-		reader: kafka.NewReader(kafka.ReaderConfig{
-			Brokers: brokers,
-			Topic:   topic,
-			GroupID: groupID,
-			// Where to begin when this group has never committed an offset.
-			// FirstOffset replays the retained log from the start; LastOffset
-			// would skip everything already in the topic.
-			StartOffset: kafka.FirstOffset,
-			// Wait for at least 1 byte but no more than 10MB per fetch, and let
-			// the broker hold an idle fetch open for at most 3s (the kafka-go
-			// default is 10s). With MinBytes 1 the broker answers the moment any
-			// data exists, so MaxWait only matters when the topic is idle — a
-			// shorter value just bounds how long a quiet consumer sits inside a
-			// single blocking fetch.
-			MinBytes: 1,
-			MaxBytes: 10e6,
-			MaxWait:  3 * time.Second,
-		}),
+// instead — which is how the notification-gateway fans one stream out to every
+// replica (each replica invents its own group ID).
+func NewConsumer(brokers []string, topic, groupID string, opts ...Option) *Consumer {
+	cfg := kafka.ReaderConfig{
+		Brokers: brokers,
+		Topic:   topic,
+		GroupID: groupID,
+		// Where to begin when this group has never committed an offset.
+		// FirstOffset replays the retained log from the start; see
+		// WithLatestStartOffset for when that's the wrong default.
+		StartOffset: kafka.FirstOffset,
+		// Wait for at least 1 byte but no more than 10MB per fetch, and let
+		// the broker hold an idle fetch open for at most 3s (the kafka-go
+		// default is 10s). With MinBytes 1 the broker answers the moment any
+		// data exists, so MaxWait only matters when the topic is idle — a
+		// shorter value just bounds how long a quiet consumer sits inside a
+		// single blocking fetch.
+		MinBytes: 1,
+		MaxBytes: 10e6,
+		MaxWait:  3 * time.Second,
 	}
+	// Options run last, so they win over the defaults above.
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return &Consumer{reader: kafka.NewReader(cfg)}
 }
 
 // Run consumes messages until ctx is cancelled, decoding each into T and
