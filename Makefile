@@ -14,7 +14,7 @@ GO_MODULES := $(shell find services pkg -name go.mod -exec dirname {} \; 2>/dev/
 GO_CODE_MODULES := $(shell for m in $(GO_MODULES); do \
 	[ -n "$$(find $$m -name '*.go' -print -quit)" ] && echo $$m; done)
 
-.PHONY: help test test-integration test-race vet fmt build tidy check up down
+.PHONY: help test test-integration test-race vet fmt build tidy check up down up-all down-all logs
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -44,8 +44,17 @@ tidy: ## Sync go.mod/go.sum in every module
 
 check: vet test ## Run vet + tests (what CI gates on)
 
-up: ## Start local infra (Kafka, Redis, TimescaleDB, Kafka UI)
+up: ## Start local infra only (Kafka, Redis, TimescaleDB, Kafka UI) — dev loop: go run on host
 	cd deploy/compose && docker compose up -d
 
 down: ## Stop local infra
 	cd deploy/compose && docker compose down
+
+up-all: ## Start EVERYTHING: infra + all six Go services, built from source
+	cd deploy/compose && docker compose --profile app up -d --build
+
+down-all: ## Stop everything, including the app services
+	cd deploy/compose && docker compose --profile app down
+
+logs: ## Follow logs of the whole stack
+	cd deploy/compose && docker compose --profile app logs -f --tail=50

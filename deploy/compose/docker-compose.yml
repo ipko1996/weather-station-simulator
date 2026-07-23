@@ -1,20 +1,19 @@
-# HU-WeatherSim — local infrastructure (Phase 0).
-# This file brings up ONLY the backing infrastructure the services need:
-#   - Kafka (single-node, KRaft mode — no ZooKeeper)
-#   - Redis (sensor registry / cache)
-#   - TimescaleDB (time-series history)
-#   - Kafka UI (a browser dashboard to SEE topics & messages while learning)
+# HU-WeatherSim — the full local stack (Phase 2).
 #
-# The Go services themselves are NOT here yet — during Phases 0–1 you run them
-# with `go run` on the host. They connect to Kafka on localhost:9092.
-# We add the services into this file in Phase 2.
+# Two layers, switched by a compose PROFILE:
+#   default            infrastructure only: Kafka, Redis, TimescaleDB, Kafka UI
+#   --profile app      + all six Go services, built from this repo
+#
+# The default stays infra-only ON PURPOSE: the day-to-day dev loop is still
+# `make up` for infra + `go run` on the host (fast rebuilds, live logs, a
+# debugger). The dual Kafka listeners below exist precisely so both worlds
+# work at once — host processes use localhost:9092, containers use kafka:29092.
 #
 # Usage:
-#   cd deploy/compose
-#   docker compose up -d      # start in the background
-#   docker compose ps         # see status/health
-#   docker compose logs -f kafka
-#   docker compose down       # stop (add -v to also wipe data volumes)
+#   make up        # infra only (docker compose up -d)
+#   make up-all    # everything (docker compose --profile app up -d --build)
+#   make logs      # follow all logs
+#   make down-all  # stop everything
 
 name: huweathersim
 
@@ -116,6 +115,113 @@ services:
       - timescale-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U weather -d weather"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # The six Go services (profile: app). Common traits, explained once:
+  #
+  #   build.context: ../..    the REPO ROOT — each service's go.mod resolves
+  #                           the shared module via `replace ../../pkg`, and
+  #                           Docker can only COPY what's inside the context.
+  #   restart: unless-stopped this is what makes the ingestion-consumer's
+  #                           crash-on-DB-error design self-healing: exit →
+  #                           restart → Kafka redelivers → ON CONFLICT dedupes.
+  #   depends_on+healthy      start order only. Services ALSO fail fast at
+  #                           boot (PING / EnsureTopic) — belt and braces,
+  #                           because on Kubernetes there is no depends_on.
+  #   KAFKA_BROKERS etc.      container-side addresses (kafka:29092, not
+  #                           localhost) — see the listener comment above.
+  # ---------------------------------------------------------------------------
+
+  sensor-gateway:
+    profiles: ["app"]
+    build: { context: ../.., dockerfile: services/sensor-gateway/Dockerfile }
+    container_name: huws-sensor-gateway
+    ports:
+      - "8080:8080" # the REST API the frontend (and curl) talks to
+    environment:
+      REDIS_ADDR: redis:6379
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Alpine's busybox ships wget; -q -O- prints the body or fails loudly.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  sensor-simulator:
+    profiles: ["app"]
+    build: { context: ../.., dockerfile: services/sensor-simulator/Dockerfile }
+    container_name: huws-sensor-simulator
+    # No ports: nothing talks TO the simulator — it only reads the registry
+    # and produces to Kafka.
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      REDIS_ADDR: redis:6379
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  ingestion-consumer:
+    profiles: ["app"]
+    build: { context: ../.., dockerfile: services/ingestion-consumer/Dockerfile }
+    container_name: huws-ingestion-consumer
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      DATABASE_URL: postgres://weather:weather@timescaledb:5432/weather
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+
+  aggregation-service:
+    profiles: ["app"]
+    build: { context: ../.., dockerfile: services/aggregation-service/Dockerfile }
+    container_name: huws-aggregation
+    environment:
+      KAFKA_BROKERS: kafka:29092
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  notification-gateway:
+    profiles: ["app"]
+    build: { context: ../.., dockerfile: services/notification-gateway/Dockerfile }
+    container_name: huws-notification-gateway
+    ports:
+      - "8082:8082" # WebSocket endpoint (/ws) for browsers and websocat
+    environment:
+      KAFKA_BROKERS: kafka:29092
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  telemetry-api:
+    profiles: ["app"]
+    build: { context: ../.., dockerfile: services/telemetry-api/Dockerfile }
+    container_name: huws-telemetry-api
+    ports:
+      - "8083:8083" # stub until Phase 5
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
