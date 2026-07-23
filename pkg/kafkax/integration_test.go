@@ -79,7 +79,9 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 	defer cancel()
 
 	const topic = "test.readings.roundtrip"
-	if err := kafkax.EnsureTopic(ctx, brokers, topic, kafkax.ReadingsPartitions); err != nil {
+	spec := kafkax.ReadingsTopic
+	spec.Name = topic
+	if err := kafkax.EnsureTopic(ctx, brokers, spec); err != nil {
 		t.Fatalf("ensure topic: %v", err)
 	}
 
@@ -160,11 +162,13 @@ func TestEnsureTopicPartitionsAndIdempotency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	const topic = "test.readings.partitions"
+	spec := kafkax.ReadingsTopic
+	spec.Name = "test.readings.partitions"
+	topic := spec.Name
 
 	// Calling twice must succeed both times.
 	for i := range 2 {
-		if err := kafkax.EnsureTopic(ctx, brokers, topic, kafkax.ReadingsPartitions); err != nil {
+		if err := kafkax.EnsureTopic(ctx, brokers, spec); err != nil {
 			t.Fatalf("EnsureTopic call %d: %v", i+1, err)
 		}
 	}
@@ -181,9 +185,9 @@ func TestEnsureTopicPartitionsAndIdempotency(t *testing.T) {
 			continue
 		}
 		found = true
-		if len(tp.Partitions) != kafkax.ReadingsPartitions {
+		if len(tp.Partitions) != spec.Partitions {
 			t.Errorf("partitions: got %d, want %d — a 1-partition topic would cap consumer parallelism at one pod",
-				len(tp.Partitions), kafkax.ReadingsPartitions)
+				len(tp.Partitions), spec.Partitions)
 		}
 	}
 	if !found {
@@ -201,7 +205,12 @@ func TestConsumerSkipsPoisonMessages(t *testing.T) {
 	defer cancel()
 
 	const topic = "test.readings.poison"
-	if err := kafkax.EnsureTopic(ctx, brokers, topic, 1); err != nil {
+	// 1 partition on purpose: with a single partition the poison and good
+	// messages are strictly ordered, so "the good one arrived" proves the
+	// consumer got PAST the poison rather than around it.
+	if err := kafkax.EnsureTopic(ctx, brokers, kafkax.TopicSpec{
+		Name: topic, Partitions: 1, Retention: time.Hour,
+	}); err != nil {
 		t.Fatalf("ensure topic: %v", err)
 	}
 

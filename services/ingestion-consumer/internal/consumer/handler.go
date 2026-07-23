@@ -35,14 +35,21 @@ type ReadingWriter interface {
 	InsertReading(ctx context.Context, r events.SensorReading) error
 }
 
-// Pipeline is the per-reading work: persist, then count.
+// Publisher is what the pipeline needs for the clean topic — satisfied by
+// *kafkax.Producer, faked in tests.
+type Publisher interface {
+	Publish(ctx context.Context, r events.SensorReading) error
+}
+
+// Pipeline is the per-reading work: persist, re-publish clean, count.
 type Pipeline struct {
 	db    ReadingWriter
+	clean Publisher
 	stats Stats
 }
 
-func NewPipeline(db ReadingWriter) *Pipeline {
-	return &Pipeline{db: db}
+func NewPipeline(db ReadingWriter, clean Publisher) *Pipeline {
+	return &Pipeline{db: db, clean: clean}
 }
 
 // Processed exposes the underlying counter for the shutdown log.
@@ -65,6 +72,17 @@ func (p *Pipeline) Processed() int64 {
 // Crash-restart-redeliver IS the retry mechanism — no retry loop in code.
 func (p *Pipeline) Handle(ctx context.Context, r events.SensorReading) error {
 	if err := p.db.InsertReading(ctx, r); err != nil {
+		return err
+	}
+
+	// Insert and publish are NOT atomic, and that's a documented trade-off
+	// rather than a bug: a crash between them means redelivery, the insert
+	// dedupes via ON CONFLICT, but the reading is published to the clean
+	// topic a second time. Downstream must tolerate occasional duplicates —
+	// the 10s-window average genuinely doesn't care — and in exchange we skip
+	// Kafka transactions entirely, which would cost more complexity than this
+	// pipeline's guarantees are worth.
+	if err := p.clean.Publish(ctx, r); err != nil {
 		return err
 	}
 

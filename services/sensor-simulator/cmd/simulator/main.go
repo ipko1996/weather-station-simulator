@@ -79,13 +79,16 @@ func run() error {
 
 	// Create the topic explicitly before producing. Auto-creation would give us
 	// a 1-partition topic and silently cap Phase 6 autoscaling — see EnsureTopic.
+	// The spec's sizing comes from kafkax; only the name is env-overridable.
+	spec := kafkax.ReadingsTopic
+	spec.Name = topic
 	topicCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := kafkax.EnsureTopic(topicCtx, brokers, topic, kafkax.ReadingsPartitions); err != nil {
-		return fmt.Errorf("ensure topic %s: %w", topic, err)
+	if err := kafkax.EnsureTopic(topicCtx, brokers, spec); err != nil {
+		return fmt.Errorf("ensure topic %s: %w", spec.Name, err)
 	}
 	log.Printf("topic %s ready (%d partitions) on %s",
-		topic, kafkax.ReadingsPartitions, strings.Join(brokers, ","))
+		spec.Name, spec.Partitions, strings.Join(brokers, ","))
 
 	producer := kafkax.NewProducer(brokers, topic)
 	// Closing the producer flushes anything still buffered. Manager.Run waits

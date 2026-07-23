@@ -65,17 +65,31 @@ func run() error {
 	}
 	log.Printf("timescaledb ready (schema ensured)")
 
-	// Every service that touches the topic ensures it exists — not just the
-	// producer. Otherwise, starting this consumer first on a fresh broker would
-	// auto-create sensor.readings with the broker default of ONE partition
-	// (capping consumer parallelism at a single pod), and nothing would ever
-	// complain. EnsureTopic is idempotent, so producer and consumer both calling
-	// it is safe — whoever starts first creates it correctly.
+	// Every service that touches a topic ensures it exists — not just the
+	// producer. Otherwise, starting this consumer first on a fresh broker
+	// would fail outright (auto-creation is off in compose). EnsureTopic is
+	// idempotent, so producer and consumer both calling it is safe — whoever
+	// starts first creates it correctly. This service touches two topics: it
+	// consumes raw readings and produces to the clean topic.
+	spec := kafkax.ReadingsTopic
+	spec.Name = topic
 	topicCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := kafkax.EnsureTopic(topicCtx, brokers, topic, kafkax.ReadingsPartitions); err != nil {
-		return fmt.Errorf("ensure topic %s: %w", topic, err)
+	if err := kafkax.EnsureTopic(topicCtx, brokers, spec); err != nil {
+		return fmt.Errorf("ensure topic %s: %w", spec.Name, err)
 	}
+	if err := kafkax.EnsureTopic(topicCtx, brokers, kafkax.CleanTopic); err != nil {
+		return fmt.Errorf("ensure topic %s: %w", kafkax.CleanTopic.Name, err)
+	}
+
+	// The producer half of this service: validated readings go back out on
+	// the clean topic for downstream consumers (aggregation, Phase 2+).
+	cleanProducer := kafkax.NewProducer(brokers, kafkax.CleanTopic.Name)
+	defer func() {
+		if err := cleanProducer.Close(); err != nil {
+			log.Printf("closing clean producer: %v", err)
+		}
+	}()
 
 	c := kafkax.NewConsumer(brokers, topic, groupID)
 	// Closing leaves the consumer group cleanly so Kafka rebalances immediately
@@ -87,7 +101,7 @@ func run() error {
 		}
 	}()
 
-	pipeline := consumer.NewPipeline(store.New(pool))
+	pipeline := consumer.NewPipeline(store.New(pool), cleanProducer)
 
 	log.Printf("consuming %s as group %q from %s", topic, groupID, strings.Join(brokers, ","))
 

@@ -19,6 +19,13 @@ import (
 // a consumer can never disagree about where the data lives.
 const TopicSensorReadings = "sensor.readings"
 
+// TopicSensorReadingsClean carries readings that passed ingestion's
+// validation. The payload is (today) byte-identical to the raw topic — what
+// differs is the CONTRACT: consumers of this topic never re-validate, so the
+// validation rules live in exactly one service. This is the topic-per-stage
+// pipeline pattern: each stage's output is a named product with a guarantee.
+const TopicSensorReadingsClean = "sensor.readings.clean"
+
 // Hungary's approximate bounding box. Readings outside it are rejected — the
 // simulated network is national, so an out-of-bounds coordinate means a bug
 // upstream (or a malformed message), not a real sensor.

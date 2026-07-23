@@ -38,9 +38,23 @@ func (f *fakeWriter) InsertReading(context.Context, events.SensorReading) error 
 	return nil
 }
 
+// fakePublisher satisfies Publisher in memory, mirroring fakeWriter's shape.
+type fakePublisher struct {
+	published atomic.Int64
+	failWith  error
+}
+
+func (f *fakePublisher) Publish(context.Context, events.SensorReading) error {
+	if f.failWith != nil {
+		return f.failWith
+	}
+	f.published.Add(1)
+	return nil
+}
+
 func TestPipelineStoresAndCounts(t *testing.T) {
-	db := &fakeWriter{}
-	p := NewPipeline(db)
+	db, pub := &fakeWriter{}, &fakePublisher{}
+	p := NewPipeline(db, pub)
 	ctx := context.Background()
 
 	if got := p.Processed(); got != 0 {
@@ -59,6 +73,29 @@ func TestPipelineStoresAndCounts(t *testing.T) {
 	if got := db.inserted.Load(); got != 5 {
 		t.Errorf("inserted: got %d, want 5", got)
 	}
+	if got := pub.published.Load(); got != 5 {
+		t.Errorf("published to clean topic: got %d, want 5", got)
+	}
+}
+
+// TestPipelinePropagatesPublishErrors: a failed clean-topic publish must also
+// block the offset commit. The insert already succeeded — on redelivery it
+// becomes an ON CONFLICT no-op and only the publish is effectively retried.
+func TestPipelinePropagatesPublishErrors(t *testing.T) {
+	kafkaDown := errors.New("broker unreachable")
+	db := &fakeWriter{}
+	p := NewPipeline(db, &fakePublisher{failWith: kafkaDown})
+
+	err := p.Handle(context.Background(), testReading("sensor-0001"))
+	if !errors.Is(err, kafkaDown) {
+		t.Fatalf("Handle: got %v, want the publisher's error", err)
+	}
+	if got := db.inserted.Load(); got != 1 {
+		t.Errorf("inserted: got %d, want 1 (insert happens before publish)", got)
+	}
+	if got := p.Processed(); got != 0 {
+		t.Errorf("processed after failed publish: got %d, want 0", got)
+	}
 }
 
 // TestPipelinePropagatesStoreErrors pins the at-least-once contract: a failed
@@ -66,7 +103,7 @@ func TestPipelineStoresAndCounts(t *testing.T) {
 // the reading is redelivered), and must not be counted as processed.
 func TestPipelinePropagatesStoreErrors(t *testing.T) {
 	dbDown := errors.New("connection refused")
-	p := NewPipeline(&fakeWriter{failWith: dbDown})
+	p := NewPipeline(&fakeWriter{failWith: dbDown}, &fakePublisher{})
 
 	err := p.Handle(context.Background(), testReading("sensor-0001"))
 	if !errors.Is(err, dbDown) {
@@ -82,8 +119,8 @@ func TestPipelinePropagatesStoreErrors(t *testing.T) {
 // counter is ever changed from atomic.Int64 to a plain int64 — which is the
 // whole reason it's atomic, now that handlers fan out across partitions.
 func TestPipelineIsConcurrencySafe(t *testing.T) {
-	db := &fakeWriter{}
-	p := NewPipeline(db)
+	db, pub := &fakeWriter{}, &fakePublisher{}
+	p := NewPipeline(db, pub)
 	ctx := context.Background()
 
 	const goroutines, perGoroutine = 20, 50
