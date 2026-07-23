@@ -2,7 +2,9 @@ go 1.26.0
 
 use (
 	./pkg
+	./services/aggregation-service
 	./services/ingestion-consumer
+	./services/notification-gateway
 	./services/sensor-gateway
 	./services/sensor-simulator
 )

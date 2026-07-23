@@ -60,6 +60,16 @@ var (
 		Partitions: 1,
 		Retention:  7 * 24 * time.Hour,
 	}
+
+	// Aggregates are ephemeral display data: they regenerate every 10s window
+	// and TimescaleDB is the durable history, so an hour of retention is
+	// already generous. 3 partitions leave room for regional scopes — the
+	// scope is the partition key, so each scope's series stays ordered.
+	AggregatesTopic = TopicSpec{
+		Name:       events.TopicWeatherAggregates,
+		Partitions: 3,
+		Retention:  time.Hour,
+	}
 )
 
 // EnsureTopic creates a topic to spec if it doesn't exist, and does nothing
