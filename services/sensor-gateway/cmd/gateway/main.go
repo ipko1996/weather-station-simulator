@@ -16,10 +16,20 @@ import (
 	"github.com/ipko1996/huweathersim/services/sensor-gateway/internal/httpapi"
 )
 
+// main stays a two-liner on purpose (same reasoning as the simulator's main):
+// log.Fatalf calls os.Exit, which SKIPS deferred functions. The Phase 0 version
+// of this file even called log.Fatalf from inside the server goroutine — an
+// os.Exit from a side goroutine that would have skipped every defer in the
+// process. Putting all work and all defers in run() closes that hole.
 func main() {
-	// Read the port from an env var, defaulting to 8080. Twelve-factor style:
-	// config comes from the environment, which is exactly how it'll work in
-	// docker-compose and later Kubernetes.
+	if err := run(); err != nil {
+		log.Fatalf("sensor-gateway: %v", err)
+	}
+}
+
+func run() error {
+	// Twelve-factor config: everything comes from the environment, which is how
+	// it works in compose (Phase 2) and Kubernetes ConfigMaps (Phase 4).
 	addr := ":" + getenv("PORT", "8080")
 
 	srv := &http.Server{
@@ -28,31 +38,53 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second, // basic protection against slow-loris
 	}
 
-	// Start the server in a goroutine so main can go on to wait for a shutdown
-	// signal. `go func() { ... }()` launches a concurrent lightweight thread —
-	// this is your first goroutine. We'll lean on these heavily from Phase 1.
+	// signal.NotifyContext replaces Phase 0's manual signal channel: it returns
+	// a context that cancels on SIGINT (Ctrl-C) or SIGTERM (what Kubernetes
+	// sends to stop a pod). Graceful shutdown starts the moment ctx is done.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// ListenAndServe blocks forever, so it runs in a goroutine and hands its
+	// error back over a channel. The buffer of 1 matters: if the server fails
+	// while nobody is receiving yet, an unbuffered send would block and leak
+	// the goroutine — buffered, it deposits the error and exits.
+	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("sensor-gateway listening on %s", addr)
-		// ListenAndServe blocks until the server stops. http.ErrServerClosed is
-		// the *expected* error on a clean shutdown, so we only log real failures.
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
-		}
+		errCh <- srv.ListenAndServe()
 	}()
 
-	// Block until we receive SIGINT (Ctrl-C) or SIGTERM (what Kubernetes sends to
-	// stop a pod). This is graceful-shutdown 101 and matters a lot in K8s later.
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop // receive from the channel: blocks here until a signal arrives
+	// Two things can end this service: the server dying (port in use, etc.) or
+	// a shutdown signal. select waits on both channels at once and takes
+	// whichever fires first — Go's Promise.race.
+	select {
+	case err := <-errCh:
+		// http.ErrServerClosed is what ListenAndServe returns after a clean
+		// Shutdown call, but reaching this branch means we did NOT call
+		// Shutdown — the server failed on its own, so any error is real.
+		return err
+	case <-ctx.Done():
+	}
 
 	log.Println("shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// A fresh context for the drain deadline — ctx is already cancelled, so
+	// reusing it would make Shutdown bail out immediately instead of giving
+	// in-flight requests up to 10s to finish.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return err
 	}
+
+	// Shutdown made ListenAndServe return ErrServerClosed into errCh; receive
+	// it so the goroutine's send is complete, and ignore it — here it just
+	// means "shut down cleanly, as asked".
+	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+
 	log.Println("bye")
+	return nil
 }
 
 // getenv returns the env var value, or a fallback if it's unset/empty.

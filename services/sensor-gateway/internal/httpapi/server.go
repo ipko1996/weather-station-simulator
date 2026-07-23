@@ -7,18 +7,46 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
-// NewRouter builds the HTTP handler for the gateway. Returning an *http.ServeMux
-// (Go's standard-library router) keeps us dependency-free for now; we can swap in
-// chi later without changing main.go, because both satisfy http.Handler.
+// NewRouter builds the HTTP handler for the gateway. Phase 0 returned a stdlib
+// *http.ServeMux here; Phase 2 swaps in chi — and main.go doesn't change,
+// because chi.Router satisfies the same one-method http.Handler interface the
+// stdlib mux does. That interface boundary is the entire reason the swap is
+// this cheap.
+//
+// Why chi at all? Two things the stdlib mux lacks:
+//   - middleware: cross-cutting wrappers (logging, panic recovery, timeouts)
+//     applied to every route in one place instead of inside each handler
+//   - route grouping + URL params ({id}) that stay readable as the sensor
+//     CRUD API grows
 func NewRouter() http.Handler {
-	mux := http.NewServeMux()
+	r := chi.NewRouter()
 
-	// "GET /healthz" is Go 1.22+ method-aware routing: this only matches GET.
-	mux.HandleFunc("GET /healthz", handleHealthz)
+	// Middleware in chi is nothing magic: each one is a plain function taking
+	// an http.Handler and returning a new http.Handler that wraps it. r.Use
+	// stacks them, so a request flows Logger → Recoverer → Timeout → route
+	// handler, and the response unwinds back out the same way.
+	r.Use(middleware.Logger) // one line per request: method, path, status, duration
 
-	return mux
+	// Recoverer turns a panicking handler into a 500 response + stack trace in
+	// the log. Without it, one panic on one request kills the whole process —
+	// every in-flight request from every other client dies with it.
+	r.Use(middleware.Recoverer)
+
+	// Timeout puts a deadline on the request *context*. Handlers doing I/O
+	// (Redis calls, from Step 3 on) pass r.Context() down, so a hung
+	// dependency cancels the request instead of leaking a goroutine forever.
+	r.Use(middleware.Timeout(30 * time.Second))
+
+	// "GET /healthz" in the Phase 0 mux becomes method + path as separate
+	// arguments. Same behavior: other methods on this path get a 405.
+	r.Get("/healthz", handleHealthz)
+
+	return r
 }
 
 // healthResponse is what /healthz returns. Struct tags (`json:"..."`) control the

@@ -1,3 +1,5 @@
 module github.com/ipko1996/huweathersim/services/sensor-gateway
 
 go 1.26.0
+
+require github.com/go-chi/chi/v5 v5.3.1

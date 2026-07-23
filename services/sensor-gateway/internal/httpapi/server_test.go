@@ -47,7 +47,10 @@ func TestHealthz(t *testing.T) {
 	})
 
 	t.Run("wrong method returns 405", func(t *testing.T) {
-		// Our route is registered as "GET /healthz", so a POST must be rejected.
+		// The route is registered as GET only, so a POST must be rejected.
+		// chi distinguishes "path exists but method doesn't" (405) from "path
+		// doesn't exist at all" (404) — worth pinning both in tests, because
+		// routers differ on this and clients rely on the distinction.
 		req := httptest.NewRequest(http.MethodPost, "/healthz", nil)
 		rec := httptest.NewRecorder()
 
@@ -55,6 +58,17 @@ func TestHealthz(t *testing.T) {
 
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("status code: got %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("unknown route returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/nope", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status code: got %d, want %d", rec.Code, http.StatusNotFound)
 		}
 	})
 }
