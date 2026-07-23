@@ -13,11 +13,9 @@ import (
 	"github.com/ipko1996/huweathersim/pkg/events"
 )
 
-// Handler processes one reading. Returning an error means "this failed and is
-// worth retrying" — the offset is not committed, so the message is redelivered.
-type Handler func(ctx context.Context, r events.SensorReading) error
-
-// Consumer reads sensor readings from a topic as part of a consumer group.
+// Consumer reads messages from a topic as part of a consumer group. It is
+// deliberately type-agnostic — decoding happens in the generic Run function,
+// so one Consumer type serves every topic and event shape in the system.
 type Consumer struct {
 	reader *kafka.Reader
 }
@@ -55,7 +53,16 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 	}
 }
 
-// Run consumes messages until ctx is cancelled, calling handler for each one.
+// Run consumes messages until ctx is cancelled, decoding each into T and
+// calling handler.
+//
+// # Why a package-level generic function, not a method
+//
+// Run must know the concrete type T to unmarshal into and to hand the handler
+// a typed value — that requires a type parameter, and Go METHODS CANNOT HAVE
+// TYPE PARAMETERS (a deliberate language restriction). So what reads most
+// naturally as c.Run[T](...) must instead be the package function
+// kafkax.Run(ctx, c, handler, dlq), taking the consumer as an argument.
 //
 // # At-least-once delivery
 //
@@ -70,7 +77,17 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 // tolerate them — but a reading is never silently lost. Auto-commit would invert
 // this into at-most-once: the offset advances on a timer whether the handler
 // succeeded or not.
-func (c *Consumer) Run(ctx context.Context, handler Handler) error {
+//
+// # Poison messages
+//
+// A message that cannot decode into T, or decodes but fails Validate, will
+// never succeed no matter how often it's retried — retrying forever would
+// block its partition (the classic "poison pill"). Those messages bypass the
+// handler entirely: with dlq set they are wrapped in an events.DeadLetter and
+// published there BEFORE the offset commits; with dlq nil they are logged and
+// skipped. Either way the partition keeps moving, and the handler can trust
+// that every T it receives is valid.
+func Run[T events.Event](ctx context.Context, c *Consumer, handler func(context.Context, T) error, dlq *Producer) error {
 	for {
 		// FetchMessage blocks until a message arrives or ctx is cancelled. It
 		// deliberately does NOT commit — that's what makes the ordering above
@@ -85,44 +102,71 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 			return fmt.Errorf("fetch message: %w", err)
 		}
 
-		var reading events.SensorReading
-		if err := json.Unmarshal(msg.Value, &reading); err != nil {
-			// A message that isn't valid JSON will never become valid. Retrying
-			// forever would block the partition — the classic "poison pill".
-			// So: log it, commit past it, move on. Phase 2 routes these to a
-			// dead-letter topic instead of dropping them.
-			log.Printf("skipping malformed message at %s[%d]@%d: %v",
-				msg.Topic, msg.Partition, msg.Offset, err)
-			if err := c.commit(ctx, msg); err != nil {
+		var event T
+		if err := json.Unmarshal(msg.Value, &event); err != nil {
+			if err := c.deadLetter(ctx, dlq, msg, fmt.Errorf("unmarshal: %w", err)); err != nil {
 				return err
 			}
 			continue
 		}
 
-		// Same reasoning: structurally valid JSON that breaks our rules is
-		// permanently bad data, not a transient failure.
-		if err := reading.Validate(); err != nil {
-			log.Printf("skipping invalid reading %s at %s[%d]@%d: %v",
-				reading.SensorID, msg.Topic, msg.Partition, msg.Offset, err)
-			if err := c.commit(ctx, msg); err != nil {
+		// Structurally valid JSON that breaks the event's own rules is just as
+		// permanently bad as garbage bytes.
+		if err := event.Validate(); err != nil {
+			if err := c.deadLetter(ctx, dlq, msg, fmt.Errorf("validate: %w", err)); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if err := handler(ctx, reading); err != nil {
+		if err := handler(ctx, event); err != nil {
 			// Handler failures are treated as retryable, so the offset is left
 			// uncommitted and the message will be redelivered. Returning here
-			// stops the consumer; in Kubernetes the pod restarts and resumes
-			// from the last committed offset.
-			return fmt.Errorf("handle reading %s at %s[%d]@%d: %w",
-				reading.SensorID, msg.Topic, msg.Partition, msg.Offset, err)
+			// stops the consumer; the process restart (compose/Kubernetes)
+			// resumes from the last committed offset.
+			return fmt.Errorf("handle message at %s[%d]@%d: %w",
+				msg.Topic, msg.Partition, msg.Offset, err)
 		}
 
 		if err := c.commit(ctx, msg); err != nil {
 			return err
 		}
 	}
+}
+
+// deadLetter disposes of one poison message: route it to the dlq (when
+// configured), then commit past it so the partition keeps flowing.
+//
+// The order is deliberate — publish BEFORE commit. A crash between the two
+// redelivers the poison message and produces a duplicate dead letter, which
+// is harmless (a human reading the DLQ sees the same evidence twice). The
+// reverse order could commit and then crash before publishing, silently
+// destroying the evidence — the exact failure a DLQ exists to prevent.
+func (c *Consumer) deadLetter(ctx context.Context, dlq *Producer, msg kafka.Message, cause error) error {
+	if dlq == nil {
+		// No DLQ configured (tests, tools): fall back to log-and-skip.
+		log.Printf("skipping poison message at %s[%d]@%d: %v",
+			msg.Topic, msg.Partition, msg.Offset, cause)
+		return c.commit(ctx, msg)
+	}
+
+	env := events.DeadLetter{
+		SourceTopic: msg.Topic,
+		Partition:   msg.Partition,
+		Offset:      msg.Offset,
+		Reason:      cause.Error(),
+		FailedAt:    time.Now().UTC(),
+		Payload:     msg.Value,
+	}
+	// A dlq publish failure is returned WITHOUT committing: the broker is
+	// clearly having trouble, and retry-by-restart will reprocess this
+	// message and try the dead-lettering again.
+	if err := dlq.Publish(ctx, env); err != nil {
+		return fmt.Errorf("dead-letter %s[%d]@%d: %w", msg.Topic, msg.Partition, msg.Offset, err)
+	}
+	log.Printf("dead-lettered poison message at %s[%d]@%d: %v",
+		msg.Topic, msg.Partition, msg.Offset, cause)
+	return c.commit(ctx, msg)
 }
 
 // commit acknowledges a message, advancing this group's committed offset.

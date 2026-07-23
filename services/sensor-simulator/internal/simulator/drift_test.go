@@ -124,8 +124,11 @@ type fakePublisher struct {
 	readings []events.SensorReading
 }
 
-func (f *fakePublisher) Publish(_ context.Context, r events.SensorReading) error {
-	f.readings = append(f.readings, r)
+func (f *fakePublisher) Publish(_ context.Context, e events.Event) error {
+	// The type assertion recovers the concrete reading from the interface.
+	// Panicking on a different type is correct here: a test publisher
+	// receiving anything but a SensorReading means the test itself is broken.
+	f.readings = append(f.readings, e.(events.SensorReading))
 	return nil
 }
 

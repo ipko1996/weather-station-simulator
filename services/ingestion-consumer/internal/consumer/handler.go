@@ -36,9 +36,11 @@ type ReadingWriter interface {
 }
 
 // Publisher is what the pipeline needs for the clean topic — satisfied by
-// *kafkax.Producer, faked in tests.
+// *kafkax.Producer, faked in tests. The events.Event parameter matches the
+// producer's signature exactly (Go interface satisfaction is signature-exact);
+// the pipeline still passes concrete SensorReading values.
 type Publisher interface {
-	Publish(ctx context.Context, r events.SensorReading) error
+	Publish(ctx context.Context, e events.Event) error
 }
 
 // Pipeline is the per-reading work: persist, re-publish clean, count.

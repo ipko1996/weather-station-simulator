@@ -23,7 +23,8 @@ func newSafePublisher() *safePublisher {
 	return &safePublisher{counts: make(map[string]int)}
 }
 
-func (p *safePublisher) Publish(_ context.Context, r events.SensorReading) error {
+func (p *safePublisher) Publish(_ context.Context, e events.Event) error {
+	r := e.(events.SensorReading)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.counts[r.SensorID]++

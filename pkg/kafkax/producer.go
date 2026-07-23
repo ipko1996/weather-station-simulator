@@ -17,7 +17,7 @@ import (
 	"github.com/ipko1996/huweathersim/pkg/events"
 )
 
-// Producer publishes sensor readings to a Kafka topic.
+// Producer publishes events to one Kafka topic.
 type Producer struct {
 	writer *kafka.Writer
 }
@@ -71,27 +71,35 @@ func NewProducer(brokers []string, topic string) *Producer {
 // latency — a 1s producer-side stall would burn half that budget doing nothing.
 const batchTimeout = 10 * time.Millisecond
 
-// Publish sends one reading to Kafka.
+// Publish sends one event to Kafka.
 //
-// The reading is validated first: a producer that emits garbage forces every
+// It takes the events.Event interface rather than a concrete type, because
+// everything the producer does — validate, key, marshal — is exactly the
+// Event contract; the payload's shape is irrelevant here. One producer type
+// therefore serves readings, dead letters and (soon) window aggregates.
+//
+// The event is validated first: a producer that emits garbage forces every
 // downstream consumer to defend against it, so the cheapest place to stop bad
 // data is before it enters the log at all.
-func (p *Producer) Publish(ctx context.Context, r events.SensorReading) error {
-	if err := r.Validate(); err != nil {
-		return fmt.Errorf("invalid reading: %w", err)
+func (p *Producer) Publish(ctx context.Context, e events.Event) error {
+	if err := e.Validate(); err != nil {
+		return fmt.Errorf("invalid event: %w", err)
 	}
 
-	value, err := json.Marshal(r)
+	value, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("marshal reading: %w", err)
+		return fmt.Errorf("marshal event: %w", err)
 	}
 
 	// The ctx here is a real cancellation signal: if the service is shutting down
 	// mid-write, this call unwinds instead of hanging.
+	//
+	// No Time field is set on the message: the broker stamps arrival time, and
+	// the payload carries its own event time (e.g. a reading's ts) — the only
+	// timestamp downstream logic is allowed to care about.
 	err = p.writer.WriteMessages(ctx, kafka.Message{
-		Key:   r.Key(), // decides the partition — see events.SensorReading.Key
+		Key:   e.Key(), // decides the partition — see events.SensorReading.Key
 		Value: value,
-		Time:  r.Time,
 	})
 	if err != nil {
 		return fmt.Errorf("write to %s: %w", p.writer.Topic, err)

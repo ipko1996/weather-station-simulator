@@ -81,6 +81,9 @@ func run() error {
 	if err := kafkax.EnsureTopic(topicCtx, brokers, kafkax.CleanTopic); err != nil {
 		return fmt.Errorf("ensure topic %s: %w", kafkax.CleanTopic.Name, err)
 	}
+	if err := kafkax.EnsureTopic(topicCtx, brokers, kafkax.DeadLetterTopic); err != nil {
+		return fmt.Errorf("ensure topic %s: %w", kafkax.DeadLetterTopic.Name, err)
+	}
 
 	// The producer half of this service: validated readings go back out on
 	// the clean topic for downstream consumers (aggregation, Phase 2+).
@@ -88,6 +91,16 @@ func run() error {
 	defer func() {
 		if err := cleanProducer.Close(); err != nil {
 			log.Printf("closing clean producer: %v", err)
+		}
+	}()
+
+	// Poison messages (bad JSON, failed validation) are wrapped and parked
+	// here instead of being dropped — Phase 1's log-and-skip, upgraded to
+	// keep the evidence. Nothing consumes this topic; inspect it in Kafka UI.
+	dlqProducer := kafkax.NewProducer(brokers, kafkax.DeadLetterTopic.Name)
+	defer func() {
+		if err := dlqProducer.Close(); err != nil {
+			log.Printf("closing dlq producer: %v", err)
 		}
 	}()
 
@@ -108,8 +121,10 @@ func run() error {
 	// Run blocks until ctx is cancelled or a handler error stops it — which
 	// for this service means "database trouble": exiting IS the retry
 	// mechanism (restart → redeliver → ON CONFLICT dedupes), see
-	// Pipeline.Handle.
-	if err := c.Run(ctx, pipeline.Handle); err != nil {
+	// Pipeline.Handle. The type parameter is inferred from pipeline.Handle's
+	// signature; the dlq producer receives everything that can't decode into
+	// a valid SensorReading.
+	if err := kafkax.Run(ctx, c, pipeline.Handle, dlqProducer); err != nil {
 		return fmt.Errorf("consumer stopped: %w", err)
 	}
 

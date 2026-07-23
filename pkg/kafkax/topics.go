@@ -50,6 +50,16 @@ var (
 		Partitions: 6,
 		Retention:  24 * time.Hour,
 	}
+
+	// The dead-letter topic is an inbox, not a stream — hence the deliberately
+	// different profile. 1 partition: volume is near-zero and ordering across
+	// sources doesn't matter. 7 days: a stream's 24h retention would delete
+	// the evidence before anyone gets around to reading it.
+	DeadLetterTopic = TopicSpec{
+		Name:       events.TopicDeadLetters,
+		Partitions: 1,
+		Retention:  7 * 24 * time.Hour,
+	}
 )
 
 // EnsureTopic creates a topic to spec if it doesn't exist, and does nothing

@@ -44,7 +44,7 @@ type fakePublisher struct {
 	failWith  error
 }
 
-func (f *fakePublisher) Publish(context.Context, events.SensorReading) error {
+func (f *fakePublisher) Publish(context.Context, events.Event) error {
 	if f.failWith != nil {
 		return f.failWith
 	}

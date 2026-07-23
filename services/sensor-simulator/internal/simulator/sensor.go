@@ -14,10 +14,14 @@ import (
 //
 // Depending on this one-method interface rather than on *kafkax.Producer is a
 // core Go idiom: "accept interfaces, return structs". The payoff is immediate —
-// tests substitute an in-memory fake and never start a broker, and Phase 2 can
-// swap in a batching publisher without touching this file.
+// tests substitute an in-memory fake and never start a broker.
+//
+// The parameter is events.Event (not SensorReading) because interface
+// satisfaction in Go is signature-EXACT: kafkax.Producer's Publish takes an
+// Event, so this interface must too, or the producer stops satisfying it.
+// Sensors still pass SensorReading values — they satisfy Event implicitly.
 type Publisher interface {
-	Publish(ctx context.Context, r events.SensorReading) error
+	Publish(ctx context.Context, e events.Event) error
 }
 
 // Sensor is one simulated weather station: a fixed location that reports a

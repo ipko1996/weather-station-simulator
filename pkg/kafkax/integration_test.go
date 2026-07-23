@@ -11,6 +11,7 @@ package kafkax_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,10 +112,10 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- consumer.Run(runCtx, func(_ context.Context, r events.SensorReading) error {
+		done <- kafkax.Run(runCtx, consumer, func(_ context.Context, r events.SensorReading) error {
 			received <- r
 			return nil
-		})
+		}, nil) // nil dlq: poison falls back to log-and-skip
 	}()
 
 	got := make([]events.SensorReading, 0, wantCount)
@@ -262,10 +263,10 @@ func TestConsumerSkipsPoisonMessages(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- consumer.Run(runCtx, func(_ context.Context, r events.SensorReading) error {
+		done <- kafkax.Run(runCtx, consumer, func(_ context.Context, r events.SensorReading) error {
 			received <- r
 			return nil
-		})
+		}, nil) // nil dlq: poison falls back to log-and-skip
 	}()
 
 	select {
@@ -283,5 +284,142 @@ func TestConsumerSkipsPoisonMessages(t *testing.T) {
 	stopConsumer()
 	if err := <-done; err != nil {
 		t.Errorf("consumer returned error on shutdown: %v", err)
+	}
+}
+
+// TestConsumerRoutesPoisonToDLQ is the dead-letter upgrade of the test above:
+// with a dlq producer wired in, the two poison messages must arrive on the
+// DLQ topic as envelopes carrying the original bytes and the reason, while
+// the good reading still reaches the handler.
+func TestConsumerRoutesPoisonToDLQ(t *testing.T) {
+	brokers := startKafka(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	const topic = "test.readings.dlqsource"
+	if err := kafkax.EnsureTopic(ctx, brokers, kafkax.TopicSpec{
+		Name: topic, Partitions: 1, Retention: time.Hour,
+	}); err != nil {
+		t.Fatalf("ensure source topic: %v", err)
+	}
+	dlqSpec := kafkax.DeadLetterTopic
+	dlqSpec.Name = "test.readings.dlq"
+	if err := kafkax.EnsureTopic(ctx, brokers, dlqSpec); err != nil {
+		t.Fatalf("ensure dlq topic: %v", err)
+	}
+
+	// Same poison trio as the log-and-skip test: garbage bytes, a Berlin
+	// reading, then a valid one.
+	good := testReading("sensor-0001", 21.5)
+	goodJSON, err := json.Marshal(good)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	outOfBounds, err := json.Marshal(events.SensorReading{
+		SensorID: "sensor-0002", Lat: 52.52, Lon: 13.40, TempC: 21.5, Time: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	garbage := []byte("this is not json at all")
+
+	w := &kafkago.Writer{
+		Addr: kafkago.TCP(brokers...), Topic: topic,
+		Balancer: &kafkago.Hash{}, RequiredAcks: kafkago.RequireAll,
+	}
+	defer w.Close()
+	if err := w.WriteMessages(ctx,
+		kafkago.Message{Key: []byte("sensor-0003"), Value: garbage},
+		kafkago.Message{Key: []byte("sensor-0002"), Value: outOfBounds},
+		kafkago.Message{Key: []byte("sensor-0001"), Value: goodJSON},
+	); err != nil {
+		t.Fatalf("write raw messages: %v", err)
+	}
+
+	dlqProducer := kafkax.NewProducer(brokers, dlqSpec.Name)
+	defer dlqProducer.Close()
+
+	consumer := kafkax.NewConsumer(brokers, topic, "test-group-dlq")
+	defer consumer.Close()
+
+	received := make(chan events.SensorReading, 1)
+	runCtx, stopConsumer := context.WithCancel(ctx)
+	defer stopConsumer()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- kafkax.Run(runCtx, consumer, func(_ context.Context, r events.SensorReading) error {
+			received <- r
+			return nil
+		}, dlqProducer)
+	}()
+
+	select {
+	case r := <-received:
+		if r.SensorID != "sensor-0001" {
+			t.Errorf("handler got %q, want sensor-0001", r.SensorID)
+		}
+	case err := <-done:
+		t.Fatalf("consumer stopped before delivering the valid reading: %v", err)
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the valid reading")
+	}
+	stopConsumer()
+	if err := <-done; err != nil {
+		t.Errorf("consumer returned error on shutdown: %v", err)
+	}
+
+	// Now read the DLQ back with the same generic machinery — a DeadLetter is
+	// just another Event, so kafkax.Run consumes envelopes as readily as
+	// readings. (Its dlq argument is nil: a dead-letter topic for the
+	// dead-letter topic would recurse forever.)
+	dlqConsumer := kafkax.NewConsumer(brokers, dlqSpec.Name, "test-group-dlq-reader")
+	defer dlqConsumer.Close()
+
+	letters := make(chan events.DeadLetter, 2)
+	dlqCtx, stopDLQ := context.WithCancel(ctx)
+	defer stopDLQ()
+	dlqDone := make(chan error, 1)
+	go func() {
+		dlqDone <- kafkax.Run(dlqCtx, dlqConsumer, func(_ context.Context, d events.DeadLetter) error {
+			letters <- d
+			return nil
+		}, nil)
+	}()
+
+	got := make([]events.DeadLetter, 0, 2)
+	for len(got) < 2 {
+		select {
+		case d := <-letters:
+			got = append(got, d)
+		case err := <-dlqDone:
+			t.Fatalf("dlq consumer stopped early with %d envelopes: %v", len(got), err)
+		case <-ctx.Done():
+			t.Fatalf("timed out with %d/2 dead letters", len(got))
+		}
+	}
+	stopDLQ()
+	<-dlqDone
+
+	// Single-partition source topic → envelopes arrive in poison order.
+	if string(got[0].Payload) != string(garbage) {
+		t.Errorf("first envelope payload: got %q, want the garbage bytes", got[0].Payload)
+	}
+	if !strings.Contains(got[0].Reason, "unmarshal") {
+		t.Errorf("first envelope reason %q should mention unmarshal", got[0].Reason)
+	}
+	if string(got[1].Payload) != string(outOfBounds) {
+		t.Errorf("second envelope payload: got %q, want the Berlin reading", got[1].Payload)
+	}
+	if !strings.Contains(got[1].Reason, "outside Hungary") {
+		t.Errorf("second envelope reason %q should mention the bounds rule", got[1].Reason)
+	}
+	for i, d := range got {
+		if d.SourceTopic != topic {
+			t.Errorf("envelope %d source topic: got %q, want %q", i, d.SourceTopic, topic)
+		}
+		if d.Offset != int64(i) {
+			t.Errorf("envelope %d offset: got %d, want %d", i, d.Offset, i)
+		}
 	}
 }
