@@ -34,7 +34,7 @@ First producer + consumer; the concurrency primitives that power the whole syste
   against a throwaway Kafka (`testcontainers-go`)
 - **Done when:** a message flows producer → Kafka → consumer, visible in the Kafka UI.
 
-## Phase 2 — Full pipeline on Docker Compose ⬜
+## Phase 2 — Full pipeline on Docker Compose ✅
 
 All 6 Go services wired through Kafka. Introduce the `chi` router here.
 
@@ -45,7 +45,7 @@ All 6 Go services wired through Kafka. Introduce the `chi` router here.
 - **Tests:** unit tests for aggregation windowing + drift patterns; handler tests for the
   gateway API; pipeline integration test
 - **Done when:** adding a sensor produces readings that land in TimescaleDB and move a live
-  average on the notification WS stream.
+  average on the notification WS stream. ✅ (`make up-all` + `make test-e2e`)
 
 ## Phase 3 — React frontend (Map page) ⬜
 
