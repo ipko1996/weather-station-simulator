@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ipko1996/huweathersim/pkg/events"
+	"github.com/ipko1996/huweathersim/pkg/registry"
 )
 
 // Publisher is anything that can send a reading onward.
@@ -32,7 +33,7 @@ type Sensor struct {
 }
 
 // NewSensor builds a sensor starting at startTemp and evolving by pattern.
-func NewSensor(id string, lat, lon, startTemp float64, interval time.Duration, pattern Pattern) *Sensor {
+func NewSensor(id string, lat, lon, startTemp float64, interval time.Duration, pattern registry.Pattern) *Sensor {
 	return &Sensor{
 		ID:       id,
 		Lat:      lat,

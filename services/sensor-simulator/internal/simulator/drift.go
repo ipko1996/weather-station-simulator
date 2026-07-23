@@ -8,18 +8,14 @@ package simulator
 import (
 	"math"
 	"math/rand/v2"
+
+	"github.com/ipko1996/huweathersim/pkg/registry"
 )
 
-// Pattern describes how a sensor's temperature evolves between readings. These
-// are the four options offered in the map UI (PROJECT.md §2).
-type Pattern string
-
-const (
-	PatternSteady  Pattern = "steady"  // hovers around its starting value
-	PatternRising  Pattern = "rising"  // warms steadily, e.g. a summer morning
-	PatternFalling Pattern = "falling" // cools steadily, e.g. after sunset
-	PatternNoisy   Pattern = "noisy"   // jumps around; a flaky or exposed sensor
-)
+// The Pattern type and its four names (steady/rising/falling/noisy) moved to
+// pkg/registry in Phase 2: the gateway must validate pattern names too, and it
+// cannot import this internal/ package across module boundaries. The split is
+// deliberate — registry owns the *names*, this file owns the *math*.
 
 // Per-reading temperature change, in °C.
 const (
@@ -38,17 +34,6 @@ const (
 	maxSimTempC = 55.0
 )
 
-// Valid reports whether p is one of the four known patterns. Used to reject bad
-// configuration at startup rather than silently defaulting.
-func (p Pattern) Valid() bool {
-	switch p {
-	case PatternSteady, PatternRising, PatternFalling, PatternNoisy:
-		return true
-	default:
-		return false
-	}
-}
-
 // Drift produces successive temperatures for one sensor.
 //
 // It holds its own *rand.Rand rather than using the global rand functions, for
@@ -56,13 +41,13 @@ func (p Pattern) Valid() bool {
 // each sensor goroutine gets its own generator instead of contending on the
 // shared global one — which matters at 2,000 sensors.
 type Drift struct {
-	pattern Pattern
+	pattern registry.Pattern
 	rng     *rand.Rand
 }
 
 // NewDrift builds a Drift for the given pattern. Pass a seeded *rand.Rand for
 // reproducible output (tests), or NewSeededRand() for real randomness.
-func NewDrift(pattern Pattern, rng *rand.Rand) *Drift {
+func NewDrift(pattern registry.Pattern, rng *rand.Rand) *Drift {
 	return &Drift{pattern: pattern, rng: rng}
 }
 
@@ -81,13 +66,13 @@ func (d *Drift) Next(current float64) float64 {
 	var next float64
 
 	switch d.pattern {
-	case PatternRising:
+	case registry.PatternRising:
 		next = current + trendStep + d.jitter(trendJitter)
-	case PatternFalling:
+	case registry.PatternFalling:
 		next = current - trendStep + d.jitter(trendJitter)
-	case PatternNoisy:
+	case registry.PatternNoisy:
 		next = current + d.jitter(noisyJitter)
-	case PatternSteady:
+	case registry.PatternSteady:
 		fallthrough
 	default:
 		// An unknown pattern degrades to steady rather than panicking: a bad

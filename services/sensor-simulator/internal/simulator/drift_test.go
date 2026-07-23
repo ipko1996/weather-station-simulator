@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ipko1996/huweathersim/pkg/events"
+	"github.com/ipko1996/huweathersim/pkg/registry"
 )
 
 // fixedRand returns a generator seeded identically every time, so tests that
@@ -21,16 +22,16 @@ func fixedRand() *rand.Rand {
 func TestDriftTrendDirection(t *testing.T) {
 	tests := []struct {
 		name    string
-		pattern Pattern
+		pattern registry.Pattern
 		// wantWarmer reports whether the end should exceed the start.
 		wantWarmer bool
 		// checkTrend is false for patterns with no directional guarantee.
 		checkTrend bool
 	}{
-		{name: "rising warms up", pattern: PatternRising, wantWarmer: true, checkTrend: true},
-		{name: "falling cools down", pattern: PatternFalling, wantWarmer: false, checkTrend: true},
-		{name: "steady has no trend", pattern: PatternSteady},
-		{name: "noisy has no trend", pattern: PatternNoisy},
+		{name: "rising warms up", pattern: registry.PatternRising, wantWarmer: true, checkTrend: true},
+		{name: "falling cools down", pattern: registry.PatternFalling, wantWarmer: false, checkTrend: true},
+		{name: "steady has no trend", pattern: registry.PatternSteady},
+		{name: "noisy has no trend", pattern: registry.PatternNoisy},
 	}
 
 	for _, tt := range tests {
@@ -59,8 +60,8 @@ func TestDriftTrendDirection(t *testing.T) {
 // TestDriftIsDeterministic pins the property the other tests rely on: same seed,
 // same sequence. Without it, a flaky failure here would be impossible to debug.
 func TestDriftIsDeterministic(t *testing.T) {
-	a := NewDrift(PatternNoisy, fixedRand())
-	b := NewDrift(PatternNoisy, fixedRand())
+	a := NewDrift(registry.PatternNoisy, fixedRand())
+	b := NewDrift(registry.PatternNoisy, fixedRand())
 
 	tempA, tempB := 20.0, 20.0
 	for i := range 20 {
@@ -76,7 +77,7 @@ func TestDriftIsDeterministic(t *testing.T) {
 // otherwise the simulator would eventually produce readings its own consumer
 // rejects. 5,000 iterations is well past the clamp.
 func TestDriftStaysWithinValidRange(t *testing.T) {
-	for _, pattern := range []Pattern{PatternSteady, PatternRising, PatternFalling, PatternNoisy} {
+	for _, pattern := range []registry.Pattern{registry.PatternSteady, registry.PatternRising, registry.PatternFalling, registry.PatternNoisy} {
 		t.Run(string(pattern), func(t *testing.T) {
 			d := NewDrift(pattern, fixedRand())
 
@@ -102,7 +103,7 @@ func TestDriftStaysWithinValidRange(t *testing.T) {
 
 // TestDriftRoundsToOneDecimal keeps the payload small, per the wire budget.
 func TestDriftRoundsToOneDecimal(t *testing.T) {
-	d := NewDrift(PatternNoisy, fixedRand())
+	d := NewDrift(registry.PatternNoisy, fixedRand())
 
 	temp := 20.0
 	for range 100 {
@@ -114,19 +115,7 @@ func TestDriftRoundsToOneDecimal(t *testing.T) {
 	}
 }
 
-func TestPatternValid(t *testing.T) {
-	valid := []Pattern{PatternSteady, PatternRising, PatternFalling, PatternNoisy}
-	for _, p := range valid {
-		if !p.Valid() {
-			t.Errorf("Valid(%q): got false, want true", p)
-		}
-	}
-	for _, p := range []Pattern{"", "sideways", "STEADY"} {
-		if p.Valid() {
-			t.Errorf("Valid(%q): got true, want false", p)
-		}
-	}
-}
+// Pattern.Valid's tests moved to pkg/registry with the type itself.
 
 // fakePublisher records readings in memory instead of sending them to Kafka.
 // This is the payoff of Sensor.Run depending on the Publisher interface: the
@@ -146,7 +135,7 @@ func (f *fakePublisher) Publish(_ context.Context, r events.SensorReading) error
 func TestSensorRunEmitsAndStops(t *testing.T) {
 	pub := &fakePublisher{}
 	// A very short interval keeps the test fast.
-	s := NewSensor("sensor-0001", 47.4979, 19.0402, 20.0, 10*time.Millisecond, PatternSteady)
+	s := NewSensor("sensor-0001", 47.4979, 19.0402, 20.0, 10*time.Millisecond, registry.PatternSteady)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -187,21 +176,21 @@ func TestSensorValidate(t *testing.T) {
 	}{
 		{
 			name:   "valid Budapest sensor",
-			sensor: NewSensor("sensor-0001", 47.4979, 19.0402, 20, time.Second, PatternSteady),
+			sensor: NewSensor("sensor-0001", 47.4979, 19.0402, 20, time.Second, registry.PatternSteady),
 		},
 		{
 			name:    "empty id",
-			sensor:  NewSensor("", 47.4979, 19.0402, 20, time.Second, PatternSteady),
+			sensor:  NewSensor("", 47.4979, 19.0402, 20, time.Second, registry.PatternSteady),
 			wantErr: true,
 		},
 		{
 			name:    "zero interval",
-			sensor:  NewSensor("sensor-0001", 47.4979, 19.0402, 20, 0, PatternSteady),
+			sensor:  NewSensor("sensor-0001", 47.4979, 19.0402, 20, 0, registry.PatternSteady),
 			wantErr: true,
 		},
 		{
 			name:    "location outside Hungary",
-			sensor:  NewSensor("sensor-0001", 52.52, 13.40, 20, time.Second, PatternSteady),
+			sensor:  NewSensor("sensor-0001", 52.52, 13.40, 20, time.Second, registry.PatternSteady),
 			wantErr: true,
 		},
 	}

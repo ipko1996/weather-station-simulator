@@ -2,12 +2,17 @@ module github.com/ipko1996/huweathersim/services/sensor-simulator
 
 go 1.26.0
 
-require github.com/ipko1996/huweathersim/pkg v0.0.0
+require (
+	github.com/ipko1996/huweathersim/pkg v0.0.0
+	github.com/redis/go-redis/v9 v9.21.0
+)
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.18 // indirect
 	github.com/segmentio/kafka-go v0.4.51 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 )
 
 // The shared pkg module lives in this repo and is never published to a module
