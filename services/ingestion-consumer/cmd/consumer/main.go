@@ -17,6 +17,7 @@ import (
 	"github.com/ipko1996/huweathersim/pkg/events"
 	"github.com/ipko1996/huweathersim/pkg/kafkax"
 	"github.com/ipko1996/huweathersim/services/ingestion-consumer/internal/consumer"
+	"github.com/ipko1996/huweathersim/services/ingestion-consumer/internal/store"
 )
 
 // main stays a two-liner on purpose: log.Fatalf calls os.Exit, which skips
@@ -38,10 +39,31 @@ func run() error {
 		// changing it creates a brand-new group that re-reads the whole topic
 		// from the beginning.
 		groupID = getenv("KAFKA_GROUP_ID", "ingestion-consumer")
+		// Matches the compose stack's TimescaleDB (user/password/db all
+		// "weather"); compose overrides the host to timescaledb:5432.
+		dbURL = getenv("DATABASE_URL", "postgres://weather:weather@localhost:5432/weather")
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Database first, Kafka second: joining the consumer group is the moment
+	// Kafka starts counting on us, so every other dependency must already be
+	// proven healthy by then.
+	dbCtx, cancelDB := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelDB()
+	pool, err := store.NewPool(dbCtx, dbURL)
+	if err != nil {
+		return err
+	}
+	// Close returns connections and shuts the pool down; in run() so it fires
+	// on every exit path.
+	defer pool.Close()
+
+	if err := store.EnsureSchema(dbCtx, pool); err != nil {
+		return err
+	}
+	log.Printf("timescaledb ready (schema ensured)")
 
 	// Every service that touches the topic ensures it exists — not just the
 	// producer. Otherwise, starting this consumer first on a fresh broker would
@@ -65,16 +87,19 @@ func run() error {
 		}
 	}()
 
-	var stats consumer.Stats
+	pipeline := consumer.NewPipeline(store.New(pool))
 
 	log.Printf("consuming %s as group %q from %s", topic, groupID, strings.Join(brokers, ","))
 
-	// Run blocks until ctx is cancelled or a handler fails permanently.
-	if err := c.Run(ctx, stats.Handler); err != nil {
+	// Run blocks until ctx is cancelled or a handler error stops it — which
+	// for this service means "database trouble": exiting IS the retry
+	// mechanism (restart → redeliver → ON CONFLICT dedupes), see
+	// Pipeline.Handle.
+	if err := c.Run(ctx, pipeline.Handle); err != nil {
 		return fmt.Errorf("consumer stopped: %w", err)
 	}
 
-	log.Printf("processed %d readings, bye", stats.Processed())
+	log.Printf("processed %d readings, bye", pipeline.Processed())
 	return nil
 }
 

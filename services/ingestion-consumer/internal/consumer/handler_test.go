@@ -2,7 +2,9 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,31 +21,69 @@ func testReading(id string) events.SensorReading {
 	}
 }
 
-func TestHandlerCountsReadings(t *testing.T) {
-	var s Stats
+// fakeWriter satisfies ReadingWriter in memory — the same consumer-side
+// interface payoff as everywhere else: pipeline tests with no database. The
+// counter is atomic because the concurrency test hammers it from many
+// goroutines.
+type fakeWriter struct {
+	inserted atomic.Int64
+	failWith error // when set, every insert fails with it
+}
+
+func (f *fakeWriter) InsertReading(context.Context, events.SensorReading) error {
+	if f.failWith != nil {
+		return f.failWith
+	}
+	f.inserted.Add(1)
+	return nil
+}
+
+func TestPipelineStoresAndCounts(t *testing.T) {
+	db := &fakeWriter{}
+	p := NewPipeline(db)
 	ctx := context.Background()
 
-	if got := s.Processed(); got != 0 {
+	if got := p.Processed(); got != 0 {
 		t.Fatalf("initial count: got %d, want 0", got)
 	}
 
 	for i := range 5 {
-		if err := s.Handler(ctx, testReading("sensor-0001")); err != nil {
+		if err := p.Handle(ctx, testReading("sensor-0001")); err != nil {
 			t.Fatalf("reading %d: unexpected error %v", i, err)
 		}
 	}
 
-	if got := s.Processed(); got != 5 {
+	if got := p.Processed(); got != 5 {
 		t.Errorf("processed: got %d, want 5", got)
+	}
+	if got := db.inserted.Load(); got != 5 {
+		t.Errorf("inserted: got %d, want 5", got)
 	}
 }
 
-// TestHandlerIsConcurrencySafe runs many handlers at once and checks the count
-// is exact. Run with `go test -race` and this fails loudly if the counter is
-// ever changed from atomic.Int64 to a plain int64 — which is the whole reason
-// it's atomic. Phase 2 depends on this when it fans out across partitions.
-func TestHandlerIsConcurrencySafe(t *testing.T) {
-	var s Stats
+// TestPipelinePropagatesStoreErrors pins the at-least-once contract: a failed
+// insert must surface as a handler error (so the offset is NOT committed and
+// the reading is redelivered), and must not be counted as processed.
+func TestPipelinePropagatesStoreErrors(t *testing.T) {
+	dbDown := errors.New("connection refused")
+	p := NewPipeline(&fakeWriter{failWith: dbDown})
+
+	err := p.Handle(context.Background(), testReading("sensor-0001"))
+	if !errors.Is(err, dbDown) {
+		t.Fatalf("Handle: got %v, want the store's error", err)
+	}
+	if got := p.Processed(); got != 0 {
+		t.Errorf("processed after failed insert: got %d, want 0", got)
+	}
+}
+
+// TestPipelineIsConcurrencySafe runs many handlers at once and checks the
+// count is exact. Run with `go test -race` and this fails loudly if the
+// counter is ever changed from atomic.Int64 to a plain int64 — which is the
+// whole reason it's atomic, now that handlers fan out across partitions.
+func TestPipelineIsConcurrencySafe(t *testing.T) {
+	db := &fakeWriter{}
+	p := NewPipeline(db)
 	ctx := context.Background()
 
 	const goroutines, perGoroutine = 20, 50
@@ -56,14 +96,14 @@ func TestHandlerIsConcurrencySafe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range perGoroutine {
-				_ = s.Handler(ctx, testReading("sensor-0001"))
+				_ = p.Handle(ctx, testReading("sensor-0001"))
 			}
 		}()
 	}
 	wg.Wait()
 
-	if want := int64(goroutines * perGoroutine); s.Processed() != want {
+	if want := int64(goroutines * perGoroutine); p.Processed() != want {
 		t.Errorf("processed: got %d, want %d (lost updates indicate a data race)",
-			s.Processed(), want)
+			p.Processed(), want)
 	}
 }

@@ -1,10 +1,10 @@
 // Package consumer holds what the ingestion-consumer service does with each
 // reading it receives.
 //
-// In Phase 1 that's just logging. Phase 2 adds the real work: writing to
-// TimescaleDB and re-publishing a normalized event to sensor.readings.clean.
-// Keeping it behind a small function now means that change lands here and
-// nowhere else.
+// Phase 1 just logged. Phase 2 turns it into the real pipeline stage: persist
+// to TimescaleDB (re-publishing to sensor.readings.clean lands here next).
+// Keeping it behind a small type means those changes land here and nowhere
+// else.
 package consumer
 
 import (
@@ -28,17 +28,52 @@ func (s *Stats) Processed() int64 {
 	return s.processed.Load()
 }
 
-// Handler logs each reading and counts it.
+// ReadingWriter is what the pipeline needs from storage — declared by the
+// consumer (this package), satisfied implicitly by store.Store, faked by a
+// map in tests. Same idiom as the gateway's SensorStore.
+type ReadingWriter interface {
+	InsertReading(ctx context.Context, r events.SensorReading) error
+}
+
+// Pipeline is the per-reading work: persist, then count.
+type Pipeline struct {
+	db    ReadingWriter
+	stats Stats
+}
+
+func NewPipeline(db ReadingWriter) *Pipeline {
+	return &Pipeline{db: db}
+}
+
+// Processed exposes the underlying counter for the shutdown log.
+func (p *Pipeline) Processed() int64 {
+	return p.stats.Processed()
+}
+
+// Handle persists one reading.
 //
-// It returns an error type matching kafkax.Handler, and the distinction matters:
-// returning an error means "retryable — do not commit the offset", so the
-// message is redelivered. Logging can't fail, so Phase 1 always returns nil;
-// Phase 2's database write is the first thing that can genuinely fail here.
-func (s *Stats) Handler(_ context.Context, r events.SensorReading) error {
-	n := s.processed.Add(1)
+// Every error returned here is treated as TRANSIENT, and that's a designed
+// invariant, not an assumption: permanently-bad messages (unparseable JSON,
+// failed validation) never reach this handler — kafkax filters them out
+// before it. So a failure here means infrastructure (database down, network),
+// and the full recovery chain is:
+//
+//	return err → offset NOT committed → Run returns → process exits
+//	→ restart (compose restart policy) → Kafka redelivers
+//	→ InsertReading's ON CONFLICT absorbs any half-done work
+//
+// Crash-restart-redeliver IS the retry mechanism — no retry loop in code.
+func (p *Pipeline) Handle(ctx context.Context, r events.SensorReading) error {
+	if err := p.db.InsertReading(ctx, r); err != nil {
+		return err
+	}
 
-	log.Printf("reading #%d: sensor=%s temp=%.1f°C at (%.4f, %.4f) ts=%s",
-		n, r.SensorID, r.TempC, r.Lat, r.Lon, r.Time.Format("15:04:05"))
-
+	n := p.stats.processed.Add(1)
+	// Per-reading logging is deliberate while building the pipeline — seeing
+	// every message IS the point right now. At the Phase 6 stress rate
+	// (2,000 msg/s) this must become sampled or structured-and-leveled, or
+	// the firehose drowns every useful line.
+	log.Printf("reading #%d stored: sensor=%s temp=%.1f°C ts=%s",
+		n, r.SensorID, r.TempC, r.Time.Format("15:04:05"))
 	return nil
 }
