@@ -7,4 +7,6 @@ use (
 	./services/notification-gateway
 	./services/sensor-gateway
 	./services/sensor-simulator
+	./services/telemetry-api
+	./tests/e2e
 )
