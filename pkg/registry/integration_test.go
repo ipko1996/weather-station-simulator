@@ -131,6 +131,62 @@ func TestRegistryNotFound(t *testing.T) {
 	}
 }
 
+// TestRegistryWatchDeliversKicks: an Add must reach a running Watch as a kick
+// — the pub/sub fast path the simulator's manager hangs off.
+func TestRegistryWatchDeliversKicks(t *testing.T) {
+	reg := registry.New(startRedis(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	kicks := make(chan struct{}, 16)
+	watchDone := make(chan error, 1)
+	go func() {
+		watchDone <- reg.Watch(ctx, func() { kicks <- struct{}{} })
+	}()
+
+	// SUBSCRIBE is established asynchronously (Channel() spins up the receive
+	// loop in the background), and pub/sub does not queue for late
+	// subscribers — so a single immediate Add could be published into the
+	// void and hang the test. Publishing repeatedly until the first kick
+	// arrives makes the test robust without any sleep guesswork.
+	deadline := time.After(10 * time.Second)
+	for kicked := false; !kicked; {
+		if err := reg.Add(ctx, testSensor("sensor-watch")); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+		select {
+		case <-kicks:
+			kicked = true
+		case <-time.After(200 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("no kick within 10s of repeated Adds")
+		}
+	}
+
+	// Once the subscription is live, delivery is synchronous enough that a
+	// single Remove must produce a kick promptly.
+	if _, err := reg.Remove(ctx, "sensor-watch"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	select {
+	case <-kicks:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no kick within 5s of Remove")
+	}
+
+	// Cancellation must end Watch cleanly — it runs as a bare goroutine in
+	// the simulator, so a clean exit is its whole shutdown contract.
+	cancel()
+	select {
+	case err := <-watchDone:
+		if err != nil {
+			t.Fatalf("Watch returned error on cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch did not return within 5s of cancellation")
+	}
+}
+
 // TestRegistryRejectsInvalidSensor: validation happens at the Add boundary, so
 // nothing invalid can ever be stored — downstream readers rely on that.
 func TestRegistryRejectsInvalidSensor(t *testing.T) {

@@ -101,12 +101,23 @@ func run() error {
 	// One shared producer for the whole fleet: kafka-go's Writer is
 	// goroutine-safe and batches across sensors, so 2,000 workers do NOT need
 	// 2,000 connections.
-	manager := simulator.NewManager(registry.New(rdb), producer, reconcileInterval)
+	reg := registry.New(rdb)
+	manager := simulator.NewManager(reg, producer, reconcileInterval)
 
-	// The Pub/Sub fast path (registry.Watch → manager.Kick) is wired here in
-	// the next step; until then the poll interval alone drives convergence.
+	// The Pub/Sub fast path: a gateway Add/Remove publishes a notification,
+	// Watch turns it into a Kick, and the manager reconciles within ~a second
+	// instead of waiting out the poll interval. Deliberately fire-and-forget
+	// (a plain `go` with no WaitGroup): Watch holds no resources needing a
+	// flush, exits when ctx does, and if it ever fails the service must NOT
+	// die with it — the poll keeps reconciling correctly, just slower, which
+	// is precisely the degraded mode the poll exists to provide.
+	go func() {
+		if err := reg.Watch(ctx, manager.Kick); err != nil {
+			log.Printf("registry watch stopped: %v (poll keeps reconciling)", err)
+		}
+	}()
 
-	log.Printf("manager starting: reconciling every %s", reconcileInterval)
+	log.Printf("manager starting: reconciling every %s (pub/sub fast path active)", reconcileInterval)
 	return manager.Run(ctx)
 }
 

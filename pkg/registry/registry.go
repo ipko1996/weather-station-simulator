@@ -134,6 +134,40 @@ func (r *Registry) List(ctx context.Context) ([]Sensor, error) {
 	return sensors, nil
 }
 
+// Watch subscribes to ChannelSensorsChanged and calls kick after every
+// message until ctx is cancelled. It never interprets the payload: a
+// notification means "the registry changed, reconcile now", and the reconcile
+// reads the full truth from the registry anyway.
+//
+// Reliability notes, because Pub/Sub is the system's ONLY at-most-once link:
+//   - Subscribe claims a dedicated connection (a subscribed Redis connection
+//     can issue no other commands), so watching never competes with List.
+//   - go-redis re-subscribes automatically after a dropped connection, BUT
+//     anything published during the gap is silently gone — the subscriber is
+//     not told it missed something. That unfixable blind spot is exactly why
+//     callers must keep a reconcile poll running; Watch only buys latency.
+func (r *Registry) Watch(ctx context.Context, kick func()) error {
+	pubsub := r.rdb.Subscribe(ctx, ChannelSensorsChanged)
+	defer func() { _ = pubsub.Close() }()
+
+	// Channel() hands us a Go channel fed by an internal receive loop (which
+	// is also what drives the auto-resubscribe behavior described above).
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case _, ok := <-ch:
+			if !ok {
+				// Only closes after pubsub.Close — reaching it without ctx
+				// being done means something unexpected tore the pubsub down.
+				return errors.New("pubsub channel closed unexpectedly")
+			}
+			kick()
+		}
+	}
+}
+
 // Remove deletes a sensor and notifies subscribers. The bool reports whether
 // the sensor existed — the gateway needs that to choose between 204 and 404
 // without a separate Get round-trip.
